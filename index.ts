@@ -307,14 +307,24 @@ async function connectAccount(
     },
   });
 
-  const isSelf = (id: string) => !!(acct.agentId && id === acct.agentId);
+  const isSelf = (id: string, metadata?: any) => {
+    if (!acct.agentId || id !== acct.agentId) return false;
+    // Human-authored messages via Web UI use the bot's token but should not
+    // be treated as self-echo — let them through.
+    const meta =
+      typeof metadata === "string"
+        ? (() => { try { return JSON.parse(metadata); } catch { return null; } })()
+        : metadata;
+    if (meta?.provenance?.authored_by === "human") return false;
+    return true;
+  };
   const access = acct.access || {};
 
   // ─── DM Handler ──────────────────────────────────────────
   client.on("message", (msg: any) => {
     const sender = msg.sender_name || "unknown";
     const content = msg.message?.content || msg.content || "";
-    if (isSelf(msg.message?.sender_id)) return;
+    if (isSelf(msg.message?.sender_id, msg.message?.metadata)) return;
 
     if (!isDmAllowed(access, sender)) {
       log?.info?.(`${lp} DM from ${sender} rejected (dmPolicy: ${access.dmPolicy || "open"})`);
@@ -411,7 +421,7 @@ async function connectAccount(
   // Buffer thread messages (ThreadContext handles delivery via onMention)
   client.on("thread_message", (msg: any) => {
     const message = msg.message || {};
-    if (isSelf(message.sender_id)) return;
+    if (isSelf(message.sender_id, message.metadata)) return;
     const sender = message.sender_name || message.sender_id || "unknown";
     const content = message.content || "";
     log?.debug?.(
