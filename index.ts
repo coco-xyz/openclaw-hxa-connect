@@ -371,8 +371,21 @@ async function connectAccount(
     return parts.join(" ");
   }
 
+  /** Display-friendly sender name (human provenance aware). */
+  function msgSender(msg: any): string {
+    const botName = msg.sender_name || msg.sender_id || "unknown";
+    const meta =
+      typeof msg.metadata === "string"
+        ? (() => { try { return JSON.parse(msg.metadata); } catch { return null; } })()
+        : msg.metadata;
+    if (meta?.provenance?.authored_by === "human" && meta.provenance.owner_name) {
+      return `${meta.provenance.owner_name} (via ${botName})`;
+    }
+    return botName;
+  }
+
   threadCtx.onMention(({ threadId, message, snapshot }: any) => {
-    const sender = message.sender_name || message.sender_id || "unknown";
+    const sender = msgSender(message);
     const content = message.content || "";
 
     if (!isThreadAllowed(access, threadId)) {
@@ -386,23 +399,30 @@ async function connectAccount(
       return;
     }
 
-    const context = threadCtx.toPromptContext(threadId, "full");
     const isRealMention = mentionRe.test(extractText(message));
 
-    let formattedContent: string;
-    if (isRealMention || threadMode !== "smart") {
-      log?.info?.(
-        `${lp} Thread ${threadId} @mention by ${sender} (${snapshot.bufferedCount} buffered)`,
-      );
-      formattedContent = `[${dp} Thread:${threadId}] @mention by ${sender}\n\n${context}`;
-    } else {
-      log?.info?.(
-        `${lp} Thread ${threadId} smart delivery from ${sender} (${snapshot.bufferedCount} buffered)`,
-      );
-      const hint =
-        "<smart-mode>\nThis thread message was delivered in smart mode. Decide whether to respond based on relevance. Only reply when your input adds value. Reply with exactly [SKIP] to stay silent.\n</smart-mode>";
-      formattedContent = `[${dp} Thread:${threadId}] ${sender} said: ${content}\n\n${hint}\n\n${context}`;
+    // Build message with XML tags (consistent with Lark/TG format)
+    const parts: string[] = [`[${dp} Thread:${threadId}] ${sender} said: `];
+
+    // Thread context: previous messages (excluding trigger)
+    const contextMsgs = (snapshot.newMessages || []).filter((m: any) => m.id !== message.id);
+    if (contextMsgs.length > 0) {
+      const lines = contextMsgs.map((m: any) => `[${msgSender(m)}]: ${m.content || ""}`);
+      parts.push(`<thread-context>\n${lines.join("\n")}\n</thread-context>\n\n`);
     }
+
+    // Smart mode hint
+    if (!isRealMention && threadMode === "smart") {
+      parts.push(
+        "<smart-mode>\nDecide whether to respond. Reply with exactly [SKIP] when a response is unnecessary.\n</smart-mode>\n\n",
+      );
+    }
+
+    // Current message
+    parts.push(`<current-message>\n${content}\n</current-message>`);
+
+    const formattedContent = parts.join("");
+    log?.info?.(`${lp} Thread ${threadId} from ${sender} (${snapshot.bufferedCount} buffered)`);
 
     dispatchInbound({
       cfg,
