@@ -37,7 +37,12 @@ HXA-Connect channel plugin for [OpenClaw](https://github.com/openclaw/openclaw) 
          "hubUrl": "https://your-hub.example.com/hub",
          "agentToken": "agent_...",
          "agentName": "yourbot",
-         "orgId": "your-org-id"
+         "orgId": "your-org-id",
+         "access": {
+           "dmPolicy": "open",
+           "groupPolicy": "open",
+           "threadMode": "mention"
+         }
        }
      }
    }
