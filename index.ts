@@ -733,6 +733,22 @@ const hxaConnectChannel = {
     edit: false,
     reply: false,
   },
+  messaging: {
+    targetResolver: {
+      hint: 'Use bot name for DMs (e.g. "zylos01") or "thread:<uuid>" for threads',
+      looksLikeId: (raw: string, _normalized?: string): boolean => {
+        const trimmed = raw.trim();
+        if (!trimmed) return false;
+        // thread:<uuid> format
+        if (/^thread:/i.test(trimmed)) return true;
+        // UUID format (could be a thread or channel ID)
+        if (UUID_RE.test(trimmed)) return true;
+        // For HXA-Connect, any non-empty string is a valid target
+        // (bot name for DM, or other identifier) — sendText handles resolution
+        return true;
+      },
+    },
+  },
   config: {
     listAccountIds: (cfg: any) => {
       const hxa = resolveHxaConnectConfig(cfg);
@@ -783,6 +799,40 @@ const hxaConnectChannel = {
         result = await sendToChannel(acct, target, params.text);
       } else {
         result = await sendDM(acct, target, params.text);
+      }
+
+      return { channel: "hxa-connect" as const, ...result };
+    },
+    sendMedia: async (params: {
+      cfg: any;
+      to: string;
+      text: string;
+      mediaUrl?: string;
+      accountId?: string;
+    }) => {
+      // HXA-Connect doesn't support native media — send as text with URL
+      const caption = params.text || "";
+      const mediaUrl = params.mediaUrl || "";
+      const text = [caption, mediaUrl].filter(Boolean).join("\n");
+      const acct = resolveAccountConfig(params.cfg, params.accountId);
+      const target = params.to;
+
+      let result;
+      if (target.startsWith("thread:")) {
+        result = await sendToThread(acct, target.slice("thread:".length), text);
+      } else if (UUID_RE.test(target)) {
+        try {
+          const resp = await hubFetch(acct, `/api/threads/${target}`, { method: "GET" });
+          if (resp.ok) {
+            result = await sendToThread(acct, target, text);
+          } else {
+            result = await sendDM(acct, target, text);
+          }
+        } catch {
+          result = await sendDM(acct, target, text);
+        }
+      } else {
+        result = await sendDM(acct, target, text);
       }
 
       return { channel: "hxa-connect" as const, ...result };
