@@ -1,5 +1,27 @@
 # Changelog
 
+## [2.4.1] - 2026-03-05
+
+### Fixed
+- **UUID routing fallback** — separated thread probe from send; only 404 falls back to DM, other errors (401/403/500/network) now throw instead of silently misrouting to DM (#27, #29)
+
+### Added
+- **Webhook reply-to parity** — webhook inbound handler now parses `reply_to_message` (both v1 envelope and legacy format), injects `<replying-to>` tag, and passes reply metadata to `dispatchInbound`, matching WebSocket path behavior (#26, #29)
+
+## [2.4.0] - 2026-03-05
+
+### Added
+- **Reply-to message support** — inbound thread messages with `reply_to_message` now inject `<replying-to>` context tag with sender and content; outbound thread replies automatically include `reply_to` when available (#23)
+- **Reply-to fallback** — if `reply_to` target is deleted (400/NOT_FOUND), message is sent without reply instead of failing (#23)
+
+### Changed
+- Bumped `@coco-xyz/hxa-connect-sdk` from `^1.2.0` to `^1.3.0` (#23)
+
+### Fixed
+- **Sender name escaping** — `replySender` now escapes both `<` and `>` for consistent XML safety (#23)
+- **Dispatcher reply threading** — `dispatchInbound` deliver callback now passes `replyTo` options to `sendToThread` so inbound-driven replies are threaded correctly (#23)
+- **Error enrichment** — `hubFetch` thrown errors now include `status` and `responseBody` for better fallback logic (#23)
+
 ## [2.3.0] - 2026-03-05
 
 ### Fixed
