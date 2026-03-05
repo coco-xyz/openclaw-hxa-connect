@@ -246,14 +246,19 @@ async function routeOutboundMessage(
   if (/^thread:/i.test(target)) {
     return sendToThread(acct, target.slice("thread:".length), text, options);
   }
-  // UUID — probe if it's a thread; only fall back to DM on probe failure (404)
+  // UUID — probe if it's a thread; only fall back to DM on 404 probe failure
   if (UUID_RE.test(target)) {
     let isThread = false;
     try {
       await hubFetch(acct, `/api/threads/${target}`, { method: "GET" });
       isThread = true;
-    } catch {
-      // Probe failed — target is not a thread, treat as DM
+    } catch (probeErr: any) {
+      // Only treat 404/NOT_FOUND as "not a thread" — other errors should throw
+      if (probeErr?.status === 404) {
+        // Target is not a thread, fall through to DM
+      } else {
+        throw probeErr;
+      }
     }
     if (isThread) {
       return await sendToThread(acct, target, text, options);
@@ -1044,9 +1049,11 @@ async function handleInboundWebhook(req: any, res: any) {
 
   // Inject reply-to context (matching WS path behavior)
   let finalContent = content;
-  if (reply_to_message) {
-    const replySender = (reply_to_message.sender_name || reply_to_message.sender_id || "unknown").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    const replyContent = (reply_to_message.content || "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  if (reply_to_message && typeof reply_to_message === "object") {
+    const rawSender = String(reply_to_message.sender_name || reply_to_message.sender_id || "unknown");
+    const rawContent = String(reply_to_message.content || "");
+    const replySender = rawSender.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const replyContent = rawContent.replace(/</g, "&lt;").replace(/>/g, "&gt;");
     finalContent = `<replying-to>\n[${replySender}]: ${replyContent}\n</replying-to>\n\n${content}`;
   }
 
