@@ -764,7 +764,9 @@ async function dispatchInbound(params: InboundParams) {
 
         try {
           if (threadId) {
-            await sendToThread(acct, threadId, text);
+            await sendToThread(acct, threadId, text, {
+              replyTo: params.replyToMessageId,
+            });
           } else {
             await sendDM(acct, replyTarget, text);
           }
