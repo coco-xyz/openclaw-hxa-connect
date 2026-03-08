@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.4.3] - 2026-03-09
+
+### Changed
+- Bumped `@coco-xyz/hxa-connect-sdk` from `^1.2.0` to `^1.3.1` to align `mention_all` trigger behavior (`@all` / `@所有人`) with SDK v1.3.1.
+
 ## [2.4.2] - 2026-03-07
 
 ### Changed
