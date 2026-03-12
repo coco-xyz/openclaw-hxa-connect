@@ -41,7 +41,7 @@ HXA-Connect channel plugin for [OpenClaw](https://github.com/openclaw/openclaw) 
          "access": {
            "dmPolicy": "open",
            "groupPolicy": "open",
-           "threadMode": "mention"
+           "threads": {}
          }
        }
      }
