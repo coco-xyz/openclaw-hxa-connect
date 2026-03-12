@@ -13,7 +13,7 @@ interface HxaAccessConfig {
   dmPolicy?: "open" | "allowlist";
   dmAllowFrom?: string[];
   groupPolicy?: "open" | "allowlist" | "disabled";
-  threads?: Record<string, { name?: string; allowFrom?: string[]; added_at?: string }>;
+  threads?: Record<string, { name?: string; allowFrom?: string[]; added_at?: string; mode?: "mention" | "smart" }>;
   threadMode?: "mention" | "smart";
 }
 
@@ -49,7 +49,68 @@ interface HxaConnectChannelConfig {
 }
 
 function resolveHxaConnectConfig(cfg: any): HxaConnectChannelConfig {
-  return (cfg?.channels?.["hxa-connect"] ?? {}) as HxaConnectChannelConfig;
+  return migrateHxaConnectConfig((cfg?.channels?.["hxa-connect"] ?? {}) as HxaConnectChannelConfig);
+}
+
+function migrateAccessConfig(access: HxaAccessConfig | undefined): HxaAccessConfig | undefined {
+  if (!access) return access;
+
+  const threads = access.threads;
+  const orgMode = access.threadMode;
+  if ((!threads || typeof threads !== "object") && !("threadMode" in access)) {
+    return access;
+  }
+
+  let changed = false;
+  const nextThreads: NonNullable<HxaAccessConfig["threads"]> = {};
+
+  for (const [threadId, thread] of Object.entries(threads)) {
+    if (!thread || typeof thread !== "object") {
+      nextThreads[threadId] = thread as any;
+      continue;
+    }
+    if (thread.mode) {
+      nextThreads[threadId] = thread;
+      continue;
+    }
+    nextThreads[threadId] = { ...thread, mode: orgMode || "mention" };
+    changed = true;
+  }
+
+  if (!changed && !("threadMode" in access)) {
+    return access;
+  }
+
+  const nextAccess: HxaAccessConfig = {
+    ...access,
+    ...(threads && typeof threads === "object" ? { threads: nextThreads } : {}),
+  };
+  if ("threadMode" in nextAccess) {
+    delete nextAccess.threadMode;
+    changed = true;
+  }
+
+  return changed ? nextAccess : access;
+}
+
+function migrateAccountConfig(acct: HxaAccountConfig): HxaAccountConfig {
+  return {
+    ...acct,
+    access: migrateAccessConfig(acct.access),
+  };
+}
+
+function migrateHxaConnectConfig(hxa: HxaConnectChannelConfig): HxaConnectChannelConfig {
+  const next: HxaConnectChannelConfig = {
+    ...hxa,
+    access: migrateAccessConfig(hxa.access),
+  };
+  if (hxa.accounts && typeof hxa.accounts === "object") {
+    next.accounts = Object.fromEntries(
+      Object.entries(hxa.accounts).map(([id, acct]) => [id, migrateAccountConfig(acct)]),
+    );
+  }
+  return next;
 }
 
 /** Resolve all account configs, supporting both single and multi-account. */
@@ -86,6 +147,42 @@ function resolveAccountConfig(cfg: any, accountId?: string): HxaAccountConfig {
   const accounts = resolveAccounts(hxa);
   const id = accountId || "default";
   return accounts[id] || accounts[Object.keys(accounts)[0]] || {};
+}
+
+function resolveThreadMode(cfg: any, accountId: string | undefined, threadId: string): "mention" | "smart" {
+  const acct = resolveAccountConfig(cfg, accountId);
+  return acct.access?.threads?.[threadId]?.mode || "mention";
+}
+
+async function setThreadModeInConfig(
+  runtime: PluginRuntime,
+  cfg: any,
+  accountId: string | undefined,
+  threadId: string,
+  mode: "mention" | "smart",
+): Promise<{ accountId: string; threadId: string; mode: "mention" | "smart" }> {
+  const nextCfg = structuredClone(cfg ?? {});
+  nextCfg.channels = nextCfg.channels || {};
+  nextCfg.channels["hxa-connect"] = nextCfg.channels["hxa-connect"] || {};
+  const hxa = nextCfg.channels["hxa-connect"];
+
+  if (hxa.accounts && Object.keys(hxa.accounts).length > 0) {
+    const resolvedId = accountId || Object.keys(hxa.accounts)[0];
+    hxa.accounts[resolvedId] = hxa.accounts[resolvedId] || {};
+    hxa.accounts[resolvedId].access = hxa.accounts[resolvedId].access || {};
+    hxa.accounts[resolvedId].access.threads = hxa.accounts[resolvedId].access.threads || {};
+    const current = hxa.accounts[resolvedId].access.threads[threadId] || {};
+    hxa.accounts[resolvedId].access.threads[threadId] = { ...current, mode };
+    await runtime.config.writeConfigFile(nextCfg);
+    return { accountId: resolvedId, threadId, mode };
+  }
+
+  hxa.access = hxa.access || {};
+  hxa.access.threads = hxa.access.threads || {};
+  const current = hxa.access.threads[threadId] || {};
+  hxa.access.threads[threadId] = { ...current, mode };
+  await runtime.config.writeConfigFile(nextCfg);
+  return { accountId: accountId || "default", threadId, mode };
 }
 
 /** Count total configured accounts (for display prefix logic). */
@@ -205,6 +302,10 @@ async function sendToThread(
   text: string,
   options?: { replyTo?: string },
 ): Promise<{ ok: boolean; messageId?: string }> {
+  if (/^\s*\[SKIP\](?:\s|$)/i.test(text)) {
+    console.info(`[hxa-connect] [SKIP] filtered for thread ${threadId}`);
+    return { ok: true };
+  }
   if (!acct.hubUrl || !acct.agentToken) {
     throw new Error("HXA-Connect not configured (missing hubUrl or agentToken)");
   }
@@ -406,13 +507,16 @@ async function connectAccount(
   });
 
   // ─── Thread Handlers ─────────────────────────────────────
-  const threadMode = access.threadMode || "mention";
   const agentName = acct.agentName || "cococlaw";
   const threadCtx = new ThreadContext(client, {
     botNames: [agentName],
     botId: acct.agentId || undefined,
-    ...(threadMode === "smart" ? { triggerPatterns: [/^/] } : {}),
+    triggerPatterns: [/^/],
   });
+
+  function getThreadMode(threadId: string): "mention" | "smart" {
+    return access.threads?.[threadId]?.mode || "mention";
+  }
 
   const mentionRe = new RegExp(
     `@${agentName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
@@ -460,6 +564,11 @@ async function connectAccount(
     }
 
     const isRealMention = mentionRe.test(extractText(message));
+    const threadMode = getThreadMode(threadId);
+
+    if (threadMode === "mention" && !isRealMention) {
+      return;
+    }
 
     // Build message with XML tags (consistent with Lark/TG format)
     const parts: string[] = [`[${dp} Thread:${threadId}] ${sender} said: `];
@@ -664,7 +773,7 @@ async function connectAccount(
   await client.connect();
   log?.info?.(`${lp} WebSocket connected`);
   await threadCtx.start();
-  log?.info?.(`${lp} ThreadContext started (mode: ${threadMode}, filter: @${agentName})`);
+  log?.info?.(`${lp} ThreadContext started (per-thread mode, default: mention, filter: @${agentName})`);
 
   wsConnections.set(accountId, {
     client,
@@ -1110,7 +1219,7 @@ Commands:
   Thread ops: thread-create, thread-update, thread-join, thread-leave, thread-invite
   Artifacts: artifact-add, artifact-update, artifact-list, artifact-versions
   Profile: profile-update, rename
-  Admin: role, ticket-create, rotate-secret
+  Admin: role, ticket-create, rotate-secret, set-thread-mode, show-thread-mode
 
 To send messages, use the message tool: message(action="send", channel="hxa-connect", target="bot_name" or "thread:<id>", message="...")
 Important: In threads, @mention the target bot in your message text (e.g. "@bot_name hello") — bots in mention mode only receive messages where they are @mentioned.`,
@@ -1141,6 +1250,8 @@ Important: In threads, @mention the target bot in your message text (e.g. "@bot_
             "role",
             "ticket-create",
             "rotate-secret",
+            "set-thread-mode",
+            "show-thread-mode",
           ],
           description: "The HXA-Connect command to execute",
         },
@@ -1152,6 +1263,11 @@ Important: In threads, @mention the target bot in your message text (e.g. "@bot_
         thread_id: {
           type: "string",
           description: "Thread ID (for thread, messages, thread-update, thread-join, thread-leave, thread-invite, artifact-*)",
+        },
+        thread_mode: {
+          type: "string",
+          enum: ["mention", "smart"],
+          description: "Per-thread mode for set-thread-mode",
         },
         status: {
           type: "string",
@@ -1511,6 +1627,35 @@ Important: In threads, @mention the target bot in your message text (e.g. "@bot_
 
           case "rotate-secret": {
             result = await client.rotateOrgSecret();
+            break;
+          }
+
+          case "show-thread-mode": {
+            if (!params.thread_id) {
+              return errResult("thread_id is required for show-thread-mode");
+            }
+            const cfg = await getRuntime().config.loadConfig();
+            result = {
+              accountId: params.account || "default",
+              threadId: params.thread_id,
+              mode: resolveThreadMode(cfg, params.account, params.thread_id),
+            };
+            break;
+          }
+
+          case "set-thread-mode": {
+            if (!params.thread_id || !params.thread_mode) {
+              return errResult("thread_id and thread_mode are required for set-thread-mode");
+            }
+            const runtime = getRuntime();
+            const cfg = await runtime.config.loadConfig();
+            result = await setThreadModeInConfig(
+              runtime,
+              cfg,
+              params.account,
+              params.thread_id,
+              params.thread_mode,
+            );
             break;
           }
 
