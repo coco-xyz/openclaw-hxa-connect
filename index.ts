@@ -497,9 +497,6 @@ function formatAttachments(parts: any[] | undefined | null, localPaths?: Record<
 
 // ─── Media Download ─────────────────────────────────────────
 
-const DEFAULT_MEDIA_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
-const MEDIA_DOWNLOAD_TIMEOUT = 30000; // 30 seconds
-
 const MIME_TO_EXT: Record<string, string> = {
   "image/jpeg": ".jpg",
   "image/png": ".png",
@@ -511,18 +508,18 @@ const MIME_TO_EXT: Record<string, string> = {
   "application/json": ".json",
 };
 
-// Match Hub-internal file URLs: /api/files/<uuid>
-const HUB_FILE_RE = /^\/api\/files\/([a-f0-9-]+)$/i;
+// Match Hub-internal file URLs: /api/files/<id> (ID is opaque — no format constraints)
+const HUB_FILE_RE = /^\/api\/files\/(.+)$/;
 
 /**
  * Download media parts (image/file) from Hub to local filesystem.
+ * Uses client.downloadFile() from hxa-connect-sdk for the actual download.
  * Returns a map of original URL → local file path.
  * Only downloads Hub-internal URLs (/api/files/:id); external URLs are skipped.
  */
 async function downloadMediaParts(
   parts: any[] | undefined | null,
-  hubUrl: string,
-  token: string,
+  client: any,
   mediaDir: string,
   lp: string,
 ): Promise<Record<string, string>> {
@@ -541,54 +538,17 @@ async function downloadMediaParts(
     const fileId = match[1];
 
     try {
-      const fullUrl = `${hubUrl}/api/files/${fileId}`;
-      const res = await fetch(fullUrl, {
-        headers: { "Authorization": `Bearer ${token}` },
-        signal: AbortSignal.timeout(MEDIA_DOWNLOAD_TIMEOUT),
-      });
-
-      if (!res.ok) {
-        console.warn(`${lp} Media download failed: ${fullUrl} → ${res.status}`);
-        await res.body?.cancel();
-        continue;
-      }
-
-      // Check content-length before downloading full body
-      const clHeader = res.headers.get("content-length");
-      if (clHeader && parseInt(clHeader, 10) > DEFAULT_MEDIA_MAX_BYTES) {
-        console.warn(`${lp} Media too large (${formatBytes(parseInt(clHeader, 10))}), skipping: ${fileId}`);
-        await res.body?.cancel();
-        continue;
-      }
-
-      // Stream body with size guard to prevent OOM on missing Content-Length
-      const chunks: Buffer[] = [];
-      let totalBytes = 0;
-      let aborted = false;
-      for await (const chunk of res.body!) {
-        totalBytes += chunk.length;
-        if (totalBytes > DEFAULT_MEDIA_MAX_BYTES) {
-          console.warn(`${lp} Media exceeded limit during download (>${formatBytes(DEFAULT_MEDIA_MAX_BYTES)}), aborting: ${fileId}`);
-          aborted = true;
-          break; // for-await cleanup cancels the stream
-        }
-        chunks.push(Buffer.from(chunk));
-      }
-      if (aborted) continue;
-
-      const buffer = Buffer.concat(chunks);
-
-      // Determine extension from response content-type
-      const contentType = (res.headers.get("content-type") || "").split(";")[0].trim();
-      const ext = MIME_TO_EXT[contentType] || "";
+      const result = await client.downloadFile(fileId);
+      const ext = MIME_TO_EXT[result.contentType] || "";
       const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const filename = `${timestamp}-${fileId.substring(0, 8)}${ext}`;
+      const safeId = fileId.replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 16);
+      const filename = `${timestamp}-${safeId}${ext}`;
 
       const localPath = path.join(mediaDir, filename);
-      await fs.promises.writeFile(localPath, buffer);
+      await fs.promises.writeFile(localPath, Buffer.from(result.buffer));
 
       localPaths[part.url] = localPath;
-      console.log(`${lp} Media saved: ${localPath} (${formatBytes(buffer.length)})`);
+      console.log(`${lp} Media saved: ${localPath} (${formatBytes(result.size)})`);
     } catch (err: any) {
       console.warn(`${lp} Media download error for ${part.url}: ${err.message}`);
     }
@@ -678,7 +638,7 @@ async function connectAccount(
 
       // Download media after policy checks to avoid wasted effort
       const msgParts = msg.message?.parts || msg.parts;
-      const localPaths = await downloadMediaParts(msgParts, acct.hubUrl!, acct.agentToken!, mediaDir, lp);
+      const localPaths = await downloadMediaParts(msgParts, client, mediaDir, lp);
       const attachments = formatAttachments(msgParts, localPaths);
 
       log?.info?.(`${lp} DM from ${sender}: ${content.substring(0, 80)}`);
@@ -769,7 +729,7 @@ async function connectAccount(
     }
 
     // Download media for trigger message (after policy checks)
-    const localPaths = await downloadMediaParts(message.parts, acct.hubUrl!, acct.agentToken!, mediaDir, lp);
+    const localPaths = await downloadMediaParts(message.parts, client, mediaDir, lp);
     const attachments = formatAttachments(message.parts, localPaths);
 
     // Build message with XML tags (consistent with Lark/TG format)
@@ -1381,8 +1341,18 @@ async function handleInboundWebhook(req: any, res: any) {
   const whLp = `[hxa-connect:${matchedAccountId}]`;
   let localPaths: Record<string, string> = {};
   if (acct?.hubUrl && acct?.agentToken) {
-    const whMediaDir = path.join(getRuntime().dataDir, "media", matchedAccountId);
-    localPaths = await downloadMediaParts(message_parts, acct.hubUrl, acct.agentToken, whMediaDir, whLp);
+    try {
+      const sdk = await import("@coco-xyz/hxa-connect-sdk");
+      const whClient = new sdk.HxaConnectClient({
+        url: acct.hubUrl,
+        token: acct.agentToken,
+        orgId: acct.orgId,
+      });
+      const whMediaDir = path.join(getRuntime().dataDir, "media", matchedAccountId);
+      localPaths = await downloadMediaParts(message_parts, whClient, whMediaDir, whLp);
+    } catch (err: any) {
+      console.warn(`${whLp} Media download setup failed: ${err.message}`);
+    }
   }
 
   // Format non-text attachments from message parts
