@@ -1,5 +1,7 @@
 import type { OpenClawPluginApi, PluginRuntime } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
+import fs from "fs";
+import path from "path";
 
 // ─── Runtime singleton ───────────────────────────────────────
 let pluginRuntime: PluginRuntime | null = null;
@@ -446,7 +448,7 @@ function formatBytes(bytes: unknown): string {
 // complex objects not suitable for inline display — both are skipped here.
 const MAX_ATTACHMENT_PARTS = 20;
 
-function formatAttachments(parts: any[] | undefined | null): string {
+function formatAttachments(parts: any[] | undefined | null, localPaths?: Record<string, string>): string {
   if (!parts || !parts.length) return "";
   const refs: string[] = [];
   let truncated = 0;
@@ -460,16 +462,19 @@ function formatAttachments(parts: any[] | undefined | null): string {
       continue;
     }
     switch (part.type) {
-      case "image":
+      case "image": {
         if (!part.url) break;
+        const loc = localPaths?.[part.url];
         refs.push(part.alt
-          ? `[image: ${part.alt} — ${part.url}]`
-          : `[image: ${part.url}]`);
+          ? `[image: ${part.alt} — ${loc || part.url}]`
+          : `[image: ${loc || part.url}]`);
         break;
+      }
       case "file": {
         if (!part.url || !part.name) break;
         const size = part.size != null ? `, ${formatBytes(part.size)}` : "";
-        refs.push(`[file: ${part.name} (${part.mime_type || "application/octet-stream"}${size}) — ${part.url}]`);
+        const loc = localPaths?.[part.url];
+        refs.push(`[file: ${part.name} (${part.mime_type || "application/octet-stream"}${size}) — ${loc || part.url}]`);
         break;
       }
       case "link":
@@ -488,6 +493,78 @@ function formatAttachments(parts: any[] | undefined | null): string {
   }
   if (truncated > 0) refs.push(`[... and ${truncated} more]`);
   return refs.length > 0 ? "\n" + refs.join("\n") : "";
+}
+
+// ─── Media Download ─────────────────────────────────────────
+
+const MIME_TO_EXT: Record<string, string> = {
+  "image/jpeg": ".jpg",
+  "image/png": ".png",
+  "image/gif": ".gif",
+  "image/webp": ".webp",
+  "application/pdf": ".pdf",
+  "text/plain": ".txt",
+  "text/csv": ".csv",
+  "application/json": ".json",
+};
+
+// Match Hub-internal file URLs: /api/files/<id> (ID is opaque — no format constraints)
+// [^?#]+ excludes query strings and fragments from the captured ID.
+const HUB_FILE_RE = /^\/api\/files\/([^/?#]+)/;
+
+/**
+ * Download media parts (image/file) from Hub to local filesystem.
+ * Uses client.downloadFile() from hxa-connect-sdk for the actual download.
+ * Returns a map of original URL → local file path.
+ * Only downloads Hub-internal URLs (/api/files/:id); external URLs are skipped.
+ */
+async function downloadMediaParts(
+  parts: any[] | undefined | null,
+  client: any,
+  mediaDir: string,
+  lp: string,
+): Promise<Record<string, string>> {
+  if (!parts || !parts.length) return {};
+
+  const localPaths: Record<string, string> = {};
+
+  try {
+    await fs.promises.mkdir(mediaDir, { recursive: true });
+  } catch (err: any) {
+    console.warn(`${lp} Failed to create media dir ${mediaDir}: ${err.message}`);
+    return localPaths;
+  }
+
+  for (const part of parts) {
+    if (part.type !== "image" && part.type !== "file") continue;
+    if (!part.url) continue;
+
+    const match = HUB_FILE_RE.exec(part.url);
+    if (!match) continue; // External URL, skip
+
+    const fileId = match[1];
+
+    try {
+      const result = await client.downloadFile(fileId, {
+        maxBytes: 10 * 1024 * 1024, // 10 MB
+        timeout: 30_000,
+      });
+      const ext = MIME_TO_EXT[result.contentType] || "";
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const safeId = fileId.replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 16);
+      const filename = `${timestamp}-${safeId}${ext}`;
+
+      const localPath = path.join(mediaDir, filename);
+      await fs.promises.writeFile(localPath, result.buffer);
+
+      localPaths[part.url] = localPath;
+      console.log(`${lp} Media saved: ${localPath} (${formatBytes(result.size)})`);
+    } catch (err: any) {
+      console.warn(`${lp} Media download error for ${part.url}: ${err.message}`);
+    }
+  }
+
+  return localPaths;
 }
 
 /** Escape &, <, > to prevent tag injection inside XML-structured messages. */
@@ -556,29 +633,39 @@ async function connectAccount(
   const access = acct.access || {};
 
   // ─── DM Handler ──────────────────────────────────────────
-  client.on("message", (msg: any) => {
-    const sender = msg.sender_name || "unknown";
-    const content = msg.message?.content || msg.content || "";
-    if (isSelf(msg.message?.sender_id, msg.message?.metadata)) return;
-    const attachments = formatAttachments(msg.message?.parts || msg.parts);
+  const mediaDir = path.join(getRuntime().dataDir, "media", accountId);
 
-    if (!isDmAllowed(access, sender)) {
-      log?.info?.(`${lp} DM from ${sender} rejected (dmPolicy: ${access.dmPolicy || "open"})`);
-      return;
+  client.on("message", async (msg: any) => {
+    try {
+      const sender = msg.sender_name || "unknown";
+      const content = msg.message?.content || msg.content || "";
+      if (isSelf(msg.message?.sender_id, msg.message?.metadata)) return;
+
+      if (!isDmAllowed(access, sender)) {
+        log?.info?.(`${lp} DM from ${sender} rejected (dmPolicy: ${access.dmPolicy || "open"})`);
+        return;
+      }
+
+      // Download media after policy checks to avoid wasted effort
+      const msgParts = msg.message?.parts || msg.parts;
+      const localPaths = await downloadMediaParts(msgParts, client, mediaDir, lp);
+      const attachments = formatAttachments(msgParts, localPaths);
+
+      log?.info?.(`${lp} DM from ${sender}: ${content.substring(0, 80)}`);
+      dispatchInbound({
+        cfg,
+        accountId,
+        senderName: sender,
+        senderId: msg.message?.sender_id || sender,
+        content: content + attachments,
+        messageId: msg.message?.id,
+        chatType: "direct",
+        replyTarget: sender,
+        displayPrefix: dp,
+      });
+    } catch (err: any) {
+      console.error(`${lp} DM handler error: ${err.message}`);
     }
-
-    log?.info?.(`${lp} DM from ${sender}: ${content.substring(0, 80)}`);
-    dispatchInbound({
-      cfg,
-      accountId,
-      senderName: sender,
-      senderId: msg.message?.sender_id || sender,
-      content: content + attachments,
-      messageId: msg.message?.id,
-      chatType: "direct",
-      replyTarget: sender,
-      displayPrefix: dp,
-    });
   });
 
   // ─── Thread Handlers ─────────────────────────────────────
@@ -629,81 +716,88 @@ async function connectAccount(
     return botName;
   }
 
-  threadCtx.onMention(({ threadId, message, snapshot }: any) => {
-    const sender = msgSender(message);
-    const content = message.content || "";
-    const attachments = formatAttachments(message.parts);
+  threadCtx.onMention(async ({ threadId, message, snapshot }: any) => {
+    try {
+      const sender = msgSender(message);
+      const content = message.content || "";
 
-    if (!isThreadAllowed(access, threadId)) {
-      log?.info?.(
-        `${lp} Thread ${threadId} rejected (groupPolicy: ${access.groupPolicy || "open"})`,
-      );
-      return;
-    }
-    if (!isSenderAllowed(access, threadId, sender)) {
-      log?.info?.(`${lp} Sender ${sender} rejected in thread ${threadId}`);
-      return;
-    }
+      if (!isThreadAllowed(access, threadId)) {
+        log?.info?.(
+          `${lp} Thread ${threadId} rejected (groupPolicy: ${access.groupPolicy || "open"})`,
+        );
+        return;
+      }
+      if (!isSenderAllowed(access, threadId, sender)) {
+        log?.info?.(`${lp} Sender ${sender} rejected in thread ${threadId}`);
+        return;
+      }
 
-    const isRealMention = mentionRe.test(extractText(message)) || !!message.mention_all;
-    const threadMode = getThreadMode(threadId);
+      const isRealMention = mentionRe.test(extractText(message)) || !!message.mention_all;
+      const threadMode = getThreadMode(threadId);
 
-    if (threadMode === "mention" && !isRealMention) {
-      return;
-    }
+      if (threadMode === "mention" && !isRealMention) {
+        return;
+      }
 
-    // Build message with XML tags (consistent with Lark/TG format)
-    const parts: string[] = [`[${dp} Thread:${threadId}] ${sender} said: `];
+      // Download media for trigger message (after policy checks)
+      const localPaths = await downloadMediaParts(message.parts, client, mediaDir, lp);
+      const attachments = formatAttachments(message.parts, localPaths);
 
-    // Thread context: previous messages (excluding trigger)
-    const contextMsgs = (snapshot.newMessages || []).filter((m: any) => m.id !== message.id);
-    if (contextMsgs.length > 0) {
-      const lines = contextMsgs.map((m: any) => {
-        const ctxAtt = formatAttachments(m.parts);
-        return `[${escapeXml(msgSender(m))}]: ${escapeXml(m.content || "")}${escapeXml(ctxAtt)}`;
+      // Build message with XML tags (consistent with Lark/TG format)
+      const parts: string[] = [`[${dp} Thread:${threadId}] ${sender} said: `];
+
+      // Thread context: previous messages (excluding trigger) — no media download for context
+      const contextMsgs = (snapshot.newMessages || []).filter((m: any) => m.id !== message.id);
+      if (contextMsgs.length > 0) {
+        const lines = contextMsgs.map((m: any) => {
+          const ctxAtt = formatAttachments(m.parts);
+          return `[${escapeXml(msgSender(m))}]: ${escapeXml(m.content || "")}${escapeXml(ctxAtt)}`;
+        });
+        parts.push(`<thread-context>\n${lines.join("\n")}\n</thread-context>\n\n`);
+      }
+
+      // Smart mode hint
+      if (!isRealMention && threadMode === "smart") {
+        parts.push(
+          "<smart-mode>\nDecide whether to respond. Reply with exactly [SKIP] when a response is unnecessary.\n</smart-mode>\n\n",
+        );
+      }
+
+      // Reply-to context (like TG's replying-to format)
+      if (message.reply_to_message) {
+        const reply = message.reply_to_message;
+        const replySender = escapeXml(reply.sender_name || reply.sender_id || "unknown");
+        const replyContent = escapeXml(reply.content || "");
+        const replyAtt = escapeXml(formatAttachments(reply.parts));
+        parts.push(`<replying-to>\n[${replySender}]: ${replyContent}${replyAtt}\n</replying-to>\n\n`);
+      }
+
+      // Current message (includes non-text attachments with local paths when downloaded)
+      parts.push(`<current-message>\n${escapeXml(content)}${escapeXml(attachments)}\n</current-message>`);
+
+      const formattedContent = parts.join("");
+      log?.info?.(`${lp} Thread ${threadId} from ${sender} (${snapshot.bufferedCount} buffered)`);
+
+      dispatchInbound({
+        cfg,
+        accountId,
+        senderName: sender,
+        senderId: message.sender_id || sender,
+        content: formattedContent,
+        messageId: message.id,
+        chatType: "group",
+        groupSubject: `thread:${threadId}`,
+        replyTarget: `thread:${threadId}`,
+        replyToMessageId: message.id,
+        ...(message.reply_to_message ? {
+          replyToBody: message.reply_to_message.content || "",
+          replyToSender: message.reply_to_message.sender_name || message.reply_to_message.sender_id || "unknown",
+        } : {}),
+        displayPrefix: dp,
       });
-      parts.push(`<thread-context>\n${lines.join("\n")}\n</thread-context>\n\n`);
+    } catch (err: any) {
+      console.error(`${lp} Thread handler error: ${err.message}`);
     }
-
-    // Smart mode hint
-    if (!isRealMention && threadMode === "smart") {
-      parts.push(
-        "<smart-mode>\nDecide whether to respond. Reply with exactly [SKIP] when a response is unnecessary.\n</smart-mode>\n\n",
-      );
-    }
-
-    // Reply-to context (like TG's replying-to format)
-    if (message.reply_to_message) {
-      const reply = message.reply_to_message;
-      const replySender = escapeXml(reply.sender_name || reply.sender_id || "unknown");
-      const replyContent = escapeXml(reply.content || "");
-      const replyAtt = escapeXml(formatAttachments(reply.parts));
-      parts.push(`<replying-to>\n[${replySender}]: ${replyContent}${replyAtt}\n</replying-to>\n\n`);
-    }
-
-    // Current message (includes non-text attachments: image, file, link)
-    parts.push(`<current-message>\n${escapeXml(content)}${escapeXml(attachments)}\n</current-message>`);
-
-    const formattedContent = parts.join("");
-    log?.info?.(`${lp} Thread ${threadId} from ${sender} (${snapshot.bufferedCount} buffered)`);
-
-    dispatchInbound({
-      cfg,
-      accountId,
-      senderName: sender,
-      senderId: message.sender_id || sender,
-      content: formattedContent,
-      messageId: message.id,
-      chatType: "group",
-      groupSubject: `thread:${threadId}`,
-      replyTarget: `thread:${threadId}`,
-      replyToMessageId: message.id,
-      ...(message.reply_to_message ? {
-        replyToBody: message.reply_to_message.content || "",
-        replyToSender: message.reply_to_message.sender_name || message.reply_to_message.sender_id || "unknown",
-      } : {}),
-      displayPrefix: dp,
-    });
   });
 
   // Buffer thread messages (ThreadContext handles delivery via onMention)
@@ -1257,8 +1351,35 @@ async function handleInboundWebhook(req: any, res: any) {
 
   console.log(`[hxa-connect] inbound from ${sender_name}: ${content.slice(0, 100)}`);
 
+  // Download media parts from Hub to local filesystem (same as WS path)
+  const whLp = `[hxa-connect:${matchedAccountId}]`;
+  let localPaths: Record<string, string> = {};
+  const whConn = wsConnections.get(matchedAccountId);
+  if (whConn?.client) {
+    try {
+      const whMediaDir = path.join(getRuntime().dataDir, "media", matchedAccountId);
+      localPaths = await downloadMediaParts(message_parts, whConn.client, whMediaDir, whLp);
+    } catch (err: any) {
+      console.warn(`${whLp} Media download failed: ${err.message}`);
+    }
+  } else if (acct?.hubUrl && acct?.agentToken) {
+    // Fallback: create a one-off client if WS connection is not available
+    try {
+      const sdk = await import("@coco-xyz/hxa-connect-sdk");
+      const whClient = new sdk.HxaConnectClient({
+        url: acct.hubUrl,
+        token: acct.agentToken,
+        orgId: acct.orgId,
+      });
+      const whMediaDir = path.join(getRuntime().dataDir, "media", matchedAccountId);
+      localPaths = await downloadMediaParts(message_parts, whClient, whMediaDir, whLp);
+    } catch (err: any) {
+      console.warn(`${whLp} Media download setup failed: ${err.message}`);
+    }
+  }
+
   // Format non-text attachments from message parts
-  const webhookAttachments = formatAttachments(message_parts);
+  const webhookAttachments = formatAttachments(message_parts, localPaths);
 
   // Inject reply-to context (matching WS path behavior)
   let finalContent = content + webhookAttachments;
