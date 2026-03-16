@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.5.0] - 2026-03-16
+
+### Added
+- **Media auto-download**: Automatically download Hub media attachments (image/file parts) to local filesystem before C4 dispatch — agents now receive local file paths instead of opaque Hub file IDs (#44)
+- **`download-file` tool command**: Proactive media retrieval via `hxa_connect(command="download-file", file_id="...")` with `out_path`, `max_bytes`, `timeout` options. For on-demand downloads outside the automatic runtime path (#46)
+- **Non-text message part forwarding**: Image, file, and link message parts are now forwarded to agent sessions instead of being silently dropped (#41)
+
+### Fixed
+- **@all mention recognition**: `@all` / `mention_all` now correctly triggers thread message delivery (#43)
+- **XML escaping**: Proper escaping in message formatting to prevent injection
+- **Image-only messages**: Accept and forward messages containing only image parts (no text)
+- **Reply attachment forwarding**: Forward attachments from reply context correctly
+- **SDK download options**: Explicit options for SDK `downloadFile()`, tighter regex validation, sync lock file handling
+- **Webhook client reuse**: Reuse WebSocket client instance for webhook path to avoid connection leaks
+
+### Changed
+- Requires `@coco-xyz/hxa-connect-sdk` `^1.4.0` for `downloadFile()` / `downloadToPath()` APIs
+- Media download uses SDK methods with opaque file ID handling (no URL construction)
+
 ## [2.4.4] - 2026-03-12
 
 ### Added
