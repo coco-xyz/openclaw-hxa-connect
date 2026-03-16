@@ -256,7 +256,7 @@ async function hubFetch(
   if (!acct.hubUrl || !acct.hubUrl.startsWith("http")) {
     throw new Error("HXA-Connect hubUrl not configured or invalid");
   }
-  const url = `${acct.hubUrl.replace(/\/$/, "")}${path}`;
+  const url = `${acct.hubUrl.replace(/\/+$/, "")}${path}`;
   const headers: Record<string, string> = {
     Authorization: `Bearer ${acct.agentToken}`,
     ...((init.headers as Record<string, string>) ?? {}),
@@ -508,6 +508,17 @@ const MIME_TO_EXT: Record<string, string> = {
   "application/json": ".json",
 };
 
+/**
+ * Generate a local filename for a downloaded file.
+ * Sanitizes fileId to prevent path traversal and truncates to 16 chars.
+ */
+function generateFilename(fileId: string, contentType: string): string {
+  const ext = MIME_TO_EXT[contentType] || "";
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const safeId = fileId.replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 16);
+  return `${timestamp}-${safeId}${ext}`;
+}
+
 // Match Hub-internal file URLs: /api/files/<id> (ID is opaque — no format constraints)
 // [^?#]+ excludes query strings and fragments from the captured ID.
 const HUB_FILE_RE = /^\/api\/files\/([^/?#]+)/;
@@ -549,10 +560,7 @@ async function downloadMediaParts(
         maxBytes: 10 * 1024 * 1024, // 10 MB
         timeout: 30_000,
       });
-      const ext = MIME_TO_EXT[result.contentType] || "";
-      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const safeId = fileId.replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 16);
-      const filename = `${timestamp}-${safeId}${ext}`;
+      const filename = generateFilename(fileId, result.contentType);
 
       const localPath = path.join(mediaDir, filename);
       await fs.promises.writeFile(localPath, result.buffer);
@@ -1438,6 +1446,7 @@ Commands:
   Query: peers, threads, thread, messages, profile, org, inbox
   Thread ops: thread-create, thread-update, thread-join, thread-leave, thread-invite
   Artifacts: artifact-add, artifact-update, artifact-list, artifact-versions
+  Media: download-file
   Profile: profile-update, rename
   Admin: role, ticket-create, rotate-secret, set-thread-mode, show-thread-mode
 
@@ -1465,6 +1474,7 @@ Important: In threads, @mention the target bot in your message text (e.g. "@bot_
             "artifact-update",
             "artifact-list",
             "artifact-versions",
+            "download-file",
             "profile-update",
             "rename",
             "role",
@@ -1602,6 +1612,23 @@ Important: In threads, @mention the target bot in your message text (e.g. "@bot_
         expires_in: {
           type: "number",
           description: "Ticket expiry in seconds (for ticket-create)",
+        },
+        // Media params
+        file_id: {
+          type: "string",
+          description: "Hub file ID to download (for download-file)",
+        },
+        out_path: {
+          type: "string",
+          description: "Output file path (for download-file; auto-generated if omitted)",
+        },
+        max_bytes: {
+          type: "number",
+          description: "Maximum file size in bytes (for download-file; default 10 MB)",
+        },
+        timeout: {
+          type: "number",
+          description: "Download timeout in milliseconds (for download-file; default 30000)",
         },
       },
       required: ["command"],
@@ -1863,6 +1890,66 @@ Important: In threads, @mention the target bot in your message text (e.g. "@bot_
             break;
           }
 
+          // ─── Media ──────────────────────────────────────────
+          case "download-file": {
+            if (!params.file_id) {
+              return errResult("file_id is required for download-file");
+            }
+            const maxBytes = typeof params.max_bytes === "number"
+              ? params.max_bytes
+              : params.max_bytes != null ? Number(params.max_bytes)
+              : 10 * 1024 * 1024;
+            if (!Number.isFinite(maxBytes) || maxBytes <= 0) {
+              return errResult("max_bytes must be a positive number");
+            }
+            const MAX_BYTES_LIMIT = 100 * 1024 * 1024; // 100 MB
+            if (maxBytes > MAX_BYTES_LIMIT) {
+              return errResult(`max_bytes cannot exceed ${MAX_BYTES_LIMIT} (100 MB)`);
+            }
+            const dlTimeout = typeof params.timeout === "number"
+              ? params.timeout
+              : params.timeout != null ? Number(params.timeout)
+              : 30_000;
+            if (!Number.isFinite(dlTimeout) || dlTimeout <= 0) {
+              return errResult("timeout must be a positive number (milliseconds)");
+            }
+
+            const dlResult = await client.downloadFile(params.file_id, {
+              maxBytes,
+              timeout: dlTimeout,
+            });
+
+            let savedPath: string;
+            if (params.out_path) {
+              savedPath = path.resolve(params.out_path);
+              await fs.promises.mkdir(path.dirname(savedPath), { recursive: true });
+            } else {
+              const accountId = params.account || "default";
+              const dlMediaDir = path.join(getRuntime().dataDir, "media", accountId);
+              await fs.promises.mkdir(dlMediaDir, { recursive: true });
+              savedPath = path.join(dlMediaDir, generateFilename(params.file_id, dlResult.contentType));
+            }
+
+            try {
+              await fs.promises.writeFile(savedPath, dlResult.buffer);
+            } catch (writeErr) {
+              await fs.promises.unlink(savedPath).catch(() => {});
+              throw writeErr;
+            }
+
+            const baseUrl = (acct.hubUrl || "").replace(/\/+$/, "");
+            result = {
+              ok: true,
+              account: params.account || "default",
+              fileId: params.file_id,
+              contentType: dlResult.contentType,
+              size: dlResult.size,
+              savedPath,
+              sourceUrl: `${baseUrl}/api/files/${encodeURIComponent(params.file_id)}`,
+            };
+            break;
+          }
+
           case "set-thread-mode": {
             if (!params.thread_id || !params.thread_mode) {
               return errResult("thread_id and thread_mode are required for set-thread-mode");
@@ -1891,6 +1978,7 @@ Important: In threads, @mention the target bot in your message text (e.g. "@bot_
       } catch (err: any) {
         const errObj: any = { error: err.message || String(err) };
         if (err.status) errObj.status = err.status;
+        if (err.code) errObj.code = err.code;
         return {
           content: [{ type: "text", text: JSON.stringify(errObj, null, 2) }],
         };
