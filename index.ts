@@ -1,6 +1,7 @@
 import type { OpenClawPluginApi, PluginRuntime } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 import fs from "fs";
+import os from "os";
 import path from "path";
 
 // ─── Runtime singleton ───────────────────────────────────────
@@ -8,6 +9,18 @@ let pluginRuntime: PluginRuntime | null = null;
 function getRuntime(): PluginRuntime {
   if (!pluginRuntime) throw new Error("HXA-Connect runtime not initialized");
   return pluginRuntime;
+}
+
+let _dataDirWarned = false;
+function getMediaDir(accountId: string): string {
+  const runtime = getRuntime();
+  const baseDir = runtime.dataDir;
+  if (baseDir) return path.join(baseDir, "media", accountId);
+  if (!_dataDirWarned) {
+    console.warn("[hxa-connect] runtime.dataDir is undefined, falling back to os.tmpdir()");
+    _dataDirWarned = true;
+  }
+  return path.join(os.tmpdir(), "openclaw-hxa-connect", "media", accountId);
 }
 
 // ─── Types ───────────────────────────────────────────────────
@@ -641,7 +654,7 @@ async function connectAccount(
   const access = acct.access || {};
 
   // ─── DM Handler ──────────────────────────────────────────
-  const mediaDir = path.join(getRuntime().dataDir, "media", accountId);
+  const mediaDir = getMediaDir(accountId);
 
   client.on("message", async (msg: any) => {
     try {
@@ -1365,7 +1378,7 @@ async function handleInboundWebhook(req: any, res: any) {
   const whConn = wsConnections.get(matchedAccountId);
   if (whConn?.client) {
     try {
-      const whMediaDir = path.join(getRuntime().dataDir, "media", matchedAccountId);
+      const whMediaDir = getMediaDir(matchedAccountId);
       localPaths = await downloadMediaParts(message_parts, whConn.client, whMediaDir, whLp);
     } catch (err: any) {
       console.warn(`${whLp} Media download failed: ${err.message}`);
@@ -1379,7 +1392,7 @@ async function handleInboundWebhook(req: any, res: any) {
         token: acct.agentToken,
         orgId: acct.orgId,
       });
-      const whMediaDir = path.join(getRuntime().dataDir, "media", matchedAccountId);
+      const whMediaDir = getMediaDir(matchedAccountId);
       localPaths = await downloadMediaParts(message_parts, whClient, whMediaDir, whLp);
     } catch (err: any) {
       console.warn(`${whLp} Media download setup failed: ${err.message}`);
@@ -1925,7 +1938,7 @@ Important: In threads, @mention the target bot in your message text (e.g. "@bot_
               await fs.promises.mkdir(path.dirname(savedPath), { recursive: true });
             } else {
               const accountId = params.account || "default";
-              const dlMediaDir = path.join(getRuntime().dataDir, "media", accountId);
+              const dlMediaDir = getMediaDir(accountId);
               await fs.promises.mkdir(dlMediaDir, { recursive: true });
               savedPath = path.join(dlMediaDir, generateFilename(params.file_id, dlResult.contentType));
             }
