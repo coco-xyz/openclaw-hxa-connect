@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.5.2] - 2026-03-17
+
+### Fixed
+- **Plugin ID mismatch** — Manifest (`openclaw.plugin.json`) and plugin entry declared `id: "hxa-connect"`, but OpenClaw plugin loader infers `"openclaw-hxa-connect"` from package name. Mismatch caused repeated re-initialization every session, leading to session bloat and crashes. Aligned plugin ID to `"openclaw-hxa-connect"`; channel name `"hxa-connect"` unchanged (#52)
+
 ## [2.5.1] - 2026-03-17
 
 ### Fixed
