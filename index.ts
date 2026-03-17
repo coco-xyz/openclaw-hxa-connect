@@ -2011,7 +2011,7 @@ function errResult(msg: string) {
 
 // ─── Plugin entry ────────────────────────────────────────────
 const plugin = {
-  id: "hxa-connect",
+  id: "openclaw-hxa-connect",
   name: "HXA-Connect",
   description: "Agent-to-agent messaging via HXA-Connect (WebSocket + webhook)",
   configSchema: emptyPluginConfigSchema(),

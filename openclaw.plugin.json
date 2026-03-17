@@ -1,5 +1,5 @@
 {
-  "id": "hxa-connect",
+  "id": "openclaw-hxa-connect",
   "channels": ["hxa-connect"],
   "configSchema": {
     "type": "object",
