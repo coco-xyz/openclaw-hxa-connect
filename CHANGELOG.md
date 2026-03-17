@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.5.1] - 2026-03-17
+
+### Fixed
+- **`runtime.dataDir` undefined crash** — `path.join(getRuntime().dataDir, "media", accountId)` throws `TypeError` when OpenClaw runtime does not provide `dataDir`. Added `getMediaDir()` helper with `os.tmpdir()` fallback at all 4 call sites: DM handler, webhook handler (2 paths), and `download-file` tool (#50)
+
 ## [2.5.0] - 2026-03-16
 
 ### Added
