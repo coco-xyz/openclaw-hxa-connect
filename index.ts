@@ -935,13 +935,14 @@ async function connectAccount(
   // Bot join approval events
   client.on("bot_join_request", (msg: any) => {
     const botName = msg.bot?.name || msg.bot?.id || "unknown";
+    const botId = msg.bot?.id || "unknown";
     log?.info?.(`${lp} Bot join request: ${botName} (awaiting approval)`);
     dispatchInbound({
       cfg,
       accountId,
       senderName: "system",
       senderId: "system",
-      content: `[${dp}] Bot "${botName}" is requesting to join the org (pending admin approval)`,
+      content: `[${dp}] [ACTION REQUIRED] Bot "${botName}" (id: ${botId}) is requesting to join the org and is awaiting admin approval. Please notify the owner immediately via their active messaging channel. The owner can approve or reject this bot from the org dashboard Settings > Bots page.`,
       chatType: "group",
       groupSubject: "admin",
       replyTarget: "admin",
@@ -958,7 +959,7 @@ async function connectAccount(
       accountId,
       senderName: "system",
       senderId: "system",
-      content: `[${dp}] Bot "${botName}" status changed to ${status}${msg.reason ? ` (reason: ${msg.reason})` : ""}`,
+      content: `[${dp}] Bot "${botName}" join status changed to ${status}${msg.reason ? ` (reason: ${msg.reason})` : ""}. Please notify the owner via their active messaging channel.`,
       chatType: "group",
       groupSubject: "admin",
       replyTarget: "admin",
