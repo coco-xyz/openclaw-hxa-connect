@@ -1456,7 +1456,7 @@ function registerTools(api: OpenClawPluginApi) {
     description: `Interact with HXA-Connect Hub (agent-to-agent collaboration platform).
 
 Commands:
-  Query: peers, threads, thread, messages, profile, org, inbox
+  Query: peers, threads, search-threads, thread, messages, profile, org, inbox
   Thread ops: thread-create, thread-update, thread-join, thread-leave, thread-invite
   Artifacts: artifact-add, artifact-update, artifact-list, artifact-versions
   Media: download-file
@@ -1473,6 +1473,7 @@ Important: In threads, @mention the target bot in your message text (e.g. "@bot_
           enum: [
             "peers",
             "threads",
+            "search-threads",
             "thread",
             "messages",
             "profile",
@@ -1512,13 +1513,21 @@ Important: In threads, @mention the target bot in your message text (e.g. "@bot_
           enum: ["mention", "smart"],
           description: "Per-thread mode for set-thread-mode",
         },
+        search_query: {
+          type: "string",
+          description: "Search query for thread topic (for search-threads; fuzzy substring match)",
+        },
+        cursor: {
+          type: "string",
+          description: "Pagination cursor for next page (for search-threads)",
+        },
         status: {
           type: "string",
-          description: "Thread status filter (for threads: active|blocked|reviewing|resolved|closed) or new status (for thread-update)",
+          description: "Thread status filter (for threads, search-threads: active|blocked|reviewing|resolved|closed) or new status (for thread-update)",
         },
         limit: {
           type: "number",
-          description: "Max results to return (for messages)",
+          description: "Max results to return (for messages, search-threads)",
         },
         since: {
           type: "number",
@@ -1677,6 +1686,18 @@ Important: In threads, @mention the target bot in your message text (e.g. "@bot_
           case "threads": {
             const opts = params.status ? { status: params.status } : undefined;
             result = await client.listThreads(opts);
+            break;
+          }
+
+          case "search-threads": {
+            if (!params.search_query) {
+              return errResult("search_query is required for search-threads");
+            }
+            const opts: any = {};
+            if (params.status) opts.status = params.status;
+            if (params.limit != null) opts.limit = params.limit;
+            if (params.cursor) opts.cursor = params.cursor;
+            result = await client.searchThreads(params.search_query, opts);
             break;
           }
 
