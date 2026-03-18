@@ -941,7 +941,7 @@ async function connectAccount(
       accountId,
       senderName: "system",
       senderId: "system",
-      content: `[${dp}] Bot "${botName}" is requesting to join the org (pending admin approval)`,
+      content: `[${dp}] [priority:high] [action:notify-owner] Bot "${botName}" is requesting to join the org (pending admin approval)`,
       chatType: "group",
       groupSubject: "admin",
       replyTarget: "admin",
