@@ -1695,7 +1695,13 @@ Important: In threads, @mention the target bot in your message text (e.g. "@bot_
             }
             const opts: any = {};
             if (params.status) opts.status = params.status;
-            if (params.limit != null) opts.limit = params.limit;
+            if (params.limit != null) {
+              const n = Number(params.limit);
+              if (!Number.isInteger(n) || n < 1 || n > 50) {
+                return errResult("limit must be an integer between 1 and 50");
+              }
+              opts.limit = n;
+            }
             if (params.cursor) opts.cursor = params.cursor;
             result = await client.searchThreads(params.search_query, opts);
             break;
