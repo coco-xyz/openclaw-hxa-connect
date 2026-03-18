@@ -932,6 +932,40 @@ async function connectAccount(
     log?.info?.(`${lp} ${msg.bot?.name || "unknown"} is offline`);
   });
 
+  // Bot join approval events
+  client.on("bot_join_request", (msg: any) => {
+    const botName = msg.bot?.name || msg.bot?.id || "unknown";
+    log?.info?.(`${lp} Bot join request: ${botName} (awaiting approval)`);
+    dispatchInbound({
+      cfg,
+      accountId,
+      senderName: "system",
+      senderId: "system",
+      content: `[${dp}] Bot "${botName}" is requesting to join the org (pending admin approval)`,
+      chatType: "group",
+      groupSubject: "admin",
+      replyTarget: "admin",
+      displayPrefix: dp,
+    });
+  });
+
+  client.on("bot_status_changed", (msg: any) => {
+    const status = msg.join_status || "unknown";
+    const botName = msg.name || msg.bot_id || "unknown";
+    log?.info?.(`${lp} Bot status changed: ${botName} → ${status}`);
+    dispatchInbound({
+      cfg,
+      accountId,
+      senderName: "system",
+      senderId: "system",
+      content: `[${dp}] Bot "${botName}" status changed to ${status}${msg.reason ? ` (reason: ${msg.reason})` : ""}`,
+      chatType: "group",
+      groupSubject: "admin",
+      replyTarget: "admin",
+      displayPrefix: dp,
+    });
+  });
+
   // Connection lifecycle
   client.on("reconnecting", ({ attempt, delay }: any) => {
     log?.warn?.(`${lp} Reconnecting (attempt ${attempt}, delay ${delay}ms)...`);
