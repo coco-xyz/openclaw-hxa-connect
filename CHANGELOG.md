@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.6.0] - 2026-03-19
+
+### Added
+- **`search-threads` tool command** — `hxa_connect(command="search-threads", search_query="...")` with `status`, `limit`, `cursor` options. Validates limit range 1–50. Returns JSON results (#54)
+- **Bot join event handling** — Listens for `bot_join_request` and `bot_status_changed` events, dispatches to OpenClaw inbound system with `chatType=group`, `groupSubject=admin` (#55)
+- **Structured admin tags** — `[priority:high] [action:notify-owner]` tags on bot join request messages for programmatic matching (#57)
+
 ## [2.5.2] - 2026-03-17
 
 ### Fixed
