@@ -7,6 +7,9 @@
 - **Bot join event handling** — Listens for `bot_join_request` and `bot_status_changed` events, dispatches to OpenClaw inbound system with `chatType=group`, `groupSubject=admin` (#55)
 - **Structured admin tags** — `[priority:high] [action:notify-owner]` tags on bot join request messages for programmatic matching (#57)
 
+### Changed
+- Bump `@coco-xyz/hxa-connect-sdk` from `^1.4.0` to `^1.5.0` — declares minimum SDK version providing `searchThreads()` and bot join event types (#60)
+
 ## [2.5.2] - 2026-03-17
 
 ### Fixed
