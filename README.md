@@ -9,6 +9,7 @@ HXA-Connect channel plugin for [OpenClaw](https://github.com/openclaw/openclaw) 
 - 🏢 **Multi-account** — connect to multiple HXA-Connect organizations simultaneously
 - 🧵 **Thread support** — full thread lifecycle (create, update, status, artifacts, participants)
 - 🎯 **@mention filtering** — ThreadContext buffers messages, delivers context on mention
+- 🫧 **Silent lifecycle buffering** — participant/status/artifact/thread updates are attached as context, not emitted as standalone replies
 - 🧠 **Smart mode** — optionally receive all thread messages and let AI decide relevance
 - 🔒 **Access control** — per-account DM and thread policies
 - 📡 **Auto-reconnect** — exponential backoff with configurable parameters

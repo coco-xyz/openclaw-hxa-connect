@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.7.0] - 2026-03-25
+
+### Changed
+- **Thread lifecycle events are now silent context by default** — `thread_updated`, `thread_status_changed`, `thread_artifact`, and `thread_participant` no longer dispatch directly into the OpenClaw reply pipeline as standalone turns
+- **SDK-composed lifecycle context** — thread deliveries now read `ThreadContext` lifecycle snapshots and attach them as `<thread-events>` context instead of generating separate replies
+
+### Fixed
+- **Thread participant noise** — adding or removing a bot from a thread no longer causes every remaining participant bot to emit a natural-language acknowledgement
+- **Invite compatibility** — `thread_created` still reaches the agent via SDK invite delivery, so new thread acknowledgement flows keep working without a separate lifecycle bridge
+
 ## [2.6.0] - 2026-03-19
 
 ### Added

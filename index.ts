@@ -593,6 +593,38 @@ function escapeXml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+function fallbackFormatThreadLifecycleEvent(event: any): string {
+  switch (event.type) {
+    case "thread_created": {
+      const topic = event.thread?.topic || "untitled";
+      const tags = event.thread?.tags?.length ? ` (tags: ${event.thread.tags.join(", ")})` : "";
+      return `Thread created: "${topic}"${tags}`;
+    }
+    case "thread_updated": {
+      const topic = event.thread?.topic || "untitled";
+      const changes = Array.isArray(event.changes) && event.changes.length ? event.changes.join(", ") : "unknown fields";
+      return `Thread updated: "${topic}" (${changes})`;
+    }
+    case "thread_status_changed":
+      return `Thread status changed: "${event.topic}" ${event.from} -> ${event.to}${event.by ? ` by ${event.by}` : ""}`;
+    case "thread_artifact": {
+      const artifact = event.artifact || {};
+      return `Artifact ${event.action}: "${artifact.title || artifact.artifact_key}" (type: ${artifact.type})`;
+    }
+    case "thread_participant":
+      return `${event.bot_name || event.bot_id}${event.label ? ` [${event.label}]` : ""} ${event.action} the thread${event.by ? ` by ${event.by}` : ""}`;
+    default:
+      return event.type || "thread event";
+  }
+}
+
+function buildLifecycleBlock(snapshot: any, formatter: (event: any) => string): string {
+  const lifecycleEvents = snapshot?.lifecycleEvents || [];
+  if (!lifecycleEvents.length) return "";
+  const lines = lifecycleEvents.map((event: any) => `- ${escapeXml(formatter(event))}`);
+  return `<thread-events>\n${lines.join("\n")}\n</thread-events>\n\n`;
+}
+
 /** Format display prefix for log/message context. */
 function displayPrefix(accountId: string, cfg: any): string {
   const totalAccounts = countConfiguredAccounts(cfg);
@@ -616,10 +648,12 @@ async function connectAccount(
   // Dynamic import SDK
   let HxaConnectClient: any;
   let ThreadContext: any;
+  let formatThreadLifecycleEvent: (event: any) => string = fallbackFormatThreadLifecycleEvent;
   try {
     const sdk = await import("@coco-xyz/hxa-connect-sdk");
     HxaConnectClient = sdk.HxaConnectClient;
     ThreadContext = sdk.ThreadContext;
+    formatThreadLifecycleEvent = sdk.formatThreadLifecycleEvent || fallbackFormatThreadLifecycleEvent;
   } catch (err: any) {
     log?.error?.(`[hxa-connect:${accountId}] Failed to load hxa-connect-sdk: ${err.message}`);
     return;
@@ -737,18 +771,19 @@ async function connectAccount(
     return botName;
   }
 
-  threadCtx.onMention(async ({ threadId, message, snapshot }: any) => {
+  threadCtx.onMention(async ({ threadId, message, snapshot, reason }: any) => {
     try {
       const sender = msgSender(message);
       const content = message.content || "";
+      const isInteractiveDelivery = reason === "message";
 
-      if (!isThreadAllowed(access, threadId)) {
+      if (isInteractiveDelivery && !isThreadAllowed(access, threadId)) {
         log?.info?.(
           `${lp} Thread ${threadId} rejected (groupPolicy: ${access.groupPolicy || "open"})`,
         );
         return;
       }
-      if (!isSenderAllowed(access, threadId, sender)) {
+      if (isInteractiveDelivery && !isSenderAllowed(access, threadId, sender)) {
         log?.info?.(`${lp} Sender ${sender} rejected in thread ${threadId}`);
         return;
       }
@@ -756,16 +791,23 @@ async function connectAccount(
       const isRealMention = mentionRe.test(extractText(message)) || !!message.mention_all;
       const threadMode = getThreadMode(threadId);
 
-      if (threadMode === "mention" && !isRealMention) {
+      if (isInteractiveDelivery && threadMode === "mention" && !isRealMention) {
         return;
       }
 
-      // Download media for trigger message (after policy checks)
-      const localPaths = await downloadMediaParts(message.parts, client, mediaDir, lp);
+      const hasCurrentMessage = !!message.id;
+      const localPaths = hasCurrentMessage
+        ? await downloadMediaParts(message.parts, client, mediaDir, lp)
+        : {};
       const attachments = formatAttachments(message.parts, localPaths);
+      const lifecycleBlock = buildLifecycleBlock(snapshot, formatThreadLifecycleEvent);
 
       // Build message with XML tags (consistent with Lark/TG format)
-      const parts: string[] = [`[${dp} Thread:${threadId}] ${sender} said: `];
+      const parts: string[] = [
+        hasCurrentMessage
+          ? `[${dp} Thread:${threadId}] ${sender} said: `
+          : `[${dp} Thread:${threadId}] System update: `,
+      ];
 
       // Thread context: previous messages (excluding trigger) — no media download for context
       const contextMsgs = (snapshot.newMessages || []).filter((m: any) => m.id !== message.id);
@@ -777,8 +819,10 @@ async function connectAccount(
         parts.push(`<thread-context>\n${lines.join("\n")}\n</thread-context>\n\n`);
       }
 
+      if (lifecycleBlock) parts.push(lifecycleBlock);
+
       // Smart mode hint
-      if (!isRealMention && threadMode === "smart") {
+      if (isInteractiveDelivery && !isRealMention && threadMode === "smart") {
         parts.push(
           "<smart-mode>\nDecide whether to respond. Reply with exactly [SKIP] when a response is unnecessary.\n</smart-mode>\n\n",
         );
@@ -794,23 +838,29 @@ async function connectAccount(
       }
 
       // Current message (includes non-text attachments with local paths when downloaded)
-      parts.push(`<current-message>\n${escapeXml(content)}${escapeXml(attachments)}\n</current-message>`);
+      if (hasCurrentMessage) {
+        parts.push(`<current-message>\n${escapeXml(content)}${escapeXml(attachments)}\n</current-message>`);
+      }
 
       const formattedContent = parts.join("");
-      log?.info?.(`${lp} Thread ${threadId} from ${sender} (${snapshot.bufferedCount} buffered)`);
+      if (hasCurrentMessage) {
+        log?.info?.(`${lp} Thread ${threadId} from ${sender} (${snapshot.bufferedCount} buffered)`);
+      } else {
+        log?.info?.(`${lp} Thread ${threadId} lifecycle delivery (${reason})`);
+      }
 
       dispatchInbound({
         cfg,
         accountId,
-        senderName: sender,
-        senderId: message.sender_id || sender,
+        senderName: hasCurrentMessage ? sender : "system",
+        senderId: hasCurrentMessage ? (message.sender_id || sender) : "system",
         content: formattedContent,
-        messageId: message.id,
+        messageId: hasCurrentMessage ? message.id : undefined,
         chatType: "group",
         groupSubject: `thread:${threadId}`,
         replyTarget: `thread:${threadId}`,
-        replyToMessageId: message.id,
-        ...(message.reply_to_message ? {
+        ...(hasCurrentMessage ? { replyToMessageId: message.id } : {}),
+        ...(hasCurrentMessage && message.reply_to_message ? {
           replyToBody: message.reply_to_message.content || "",
           replyToSender: message.reply_to_message.sender_name || message.reply_to_message.sender_id || "unknown",
         } : {}),
@@ -838,90 +888,29 @@ async function connectAccount(
     const topic = thread.topic || "untitled";
     const tags = thread.tags?.length ? thread.tags.join(", ") : "none";
     log?.info?.(`${lp} Thread created: "${topic}" (tags: ${tags})`);
-
-    dispatchInbound({
-      cfg,
-      accountId,
-      senderName: "system",
-      senderId: "system",
-      content: `[${dp} Thread] New thread created: "${topic}" (tags: ${tags}, id: ${thread.id})`,
-      chatType: "group",
-      groupSubject: `thread:${thread.id}`,
-      replyTarget: `thread:${thread.id}`,
-      displayPrefix: dp,
-    });
   });
 
   client.on("thread_updated", (msg: any) => {
     const thread = msg.thread || {};
     const changes = msg.changes || [];
     log?.info?.(`${lp} Thread updated: "${thread.topic}" changes: ${changes.join(", ")}`);
-
-    dispatchInbound({
-      cfg,
-      accountId,
-      senderName: "system",
-      senderId: "system",
-      content: `[${dp} Thread:${thread.id}] Thread "${thread.topic}" updated: ${changes.join(", ")} (status: ${thread.status})`,
-      chatType: "group",
-      groupSubject: `thread:${thread.id}`,
-      replyTarget: `thread:${thread.id}`,
-      displayPrefix: dp,
-    });
   });
 
   client.on("thread_status_changed", (msg: any) => {
     const by = msg.by ? ` (by ${msg.by})` : "";
     log?.info?.(`${lp} Thread status: "${msg.topic}" ${msg.from} -> ${msg.to}${by}`);
-
-    dispatchInbound({
-      cfg,
-      accountId,
-      senderName: "system",
-      senderId: "system",
-      content: `[${dp} Thread:${msg.thread_id}] Thread "${msg.topic}" status changed: ${msg.from} -> ${msg.to}${by}`,
-      chatType: "group",
-      groupSubject: `thread:${msg.thread_id}`,
-      replyTarget: `thread:${msg.thread_id}`,
-      displayPrefix: dp,
-    });
   });
 
   client.on("thread_artifact", (msg: any) => {
     const artifact = msg.artifact || {};
     const action = msg.action || "added";
     log?.info?.(`${lp} Thread ${msg.thread_id} artifact ${action}: ${artifact.artifact_key}`);
-
-    dispatchInbound({
-      cfg,
-      accountId,
-      senderName: "system",
-      senderId: "system",
-      content: `[${dp} Thread:${msg.thread_id}] Artifact ${action}: "${artifact.title || artifact.artifact_key}" (type: ${artifact.type})`,
-      chatType: "group",
-      groupSubject: `thread:${msg.thread_id}`,
-      replyTarget: `thread:${msg.thread_id}`,
-      displayPrefix: dp,
-    });
   });
 
   client.on("thread_participant", (msg: any) => {
     const botName = msg.bot_name || msg.bot_id;
     const by = msg.by ? ` (by ${msg.by})` : "";
-    const labelTag = msg.label ? ` [${msg.label}]` : "";
     log?.info?.(`${lp} Thread ${msg.thread_id}: ${botName} ${msg.action}${by}`);
-
-    dispatchInbound({
-      cfg,
-      accountId,
-      senderName: "system",
-      senderId: "system",
-      content: `[${dp} Thread:${msg.thread_id}] ${botName}${labelTag} ${msg.action} the thread${by}`,
-      chatType: "group",
-      groupSubject: `thread:${msg.thread_id}`,
-      replyTarget: `thread:${msg.thread_id}`,
-      displayPrefix: dp,
-    });
   });
 
   // Bot presence
