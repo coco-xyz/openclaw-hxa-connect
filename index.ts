@@ -247,6 +247,61 @@ function isSenderAllowed(
   return af.some((a) => String(a).toLowerCase() === name);
 }
 
+// ─── Connection Recovery Constants ───────────────────────────
+const MAX_CONNECT_ATTEMPTS = 20;
+const CONNECT_INITIAL_DELAY = 3000;
+const CONNECT_MAX_DELAY = 60000;
+const CONNECT_BACKOFF = 1.5;
+const RECOVERY_DELAY_MS = 5000; // delay before reconnect after session_invalidated / reconnect_failed
+
+// ─── Inbound Protection Constants ────────────────────────────
+const MAX_CONTENT_LENGTH = 51200; // 50 KB
+const MAX_WS_PAYLOAD = 1048576;   // 1 MB
+
+// ─── Rate Limiting ───────────────────────────────────────────
+class TokenBucket {
+  private capacity: number;
+  private tokens: number;
+  private refillRate: number;
+  private refillIntervalMs: number;
+  private lastRefill: number;
+
+  constructor(capacity = 10, refillRate = 5, refillIntervalMs = 10000) {
+    this.capacity = capacity;
+    this.tokens = capacity;
+    this.refillRate = refillRate;
+    this.refillIntervalMs = refillIntervalMs;
+    this.lastRefill = Date.now();
+  }
+
+  consume(): boolean {
+    this._refill();
+    if (this.tokens < 1) return false;
+    this.tokens -= 1;
+    return true;
+  }
+
+  private _refill(): void {
+    const now = Date.now();
+    const elapsed = now - this.lastRefill;
+    if (elapsed < this.refillIntervalMs) return;
+    const intervals = Math.floor(elapsed / this.refillIntervalMs);
+    this.tokens = Math.min(this.capacity, this.tokens + intervals * this.refillRate);
+    this.lastRefill += intervals * this.refillIntervalMs;
+  }
+}
+
+const rateLimiters = new Map<string, TokenBucket>();
+
+function getRateLimiter(key: string): TokenBucket {
+  let bucket = rateLimiters.get(key);
+  if (!bucket) {
+    bucket = new TokenBucket(10, 5, 10000);
+    rateLimiters.set(key, bucket);
+  }
+  return bucket;
+}
+
 // ─── Outbound: send message to HXA-Connect ───────────────────
 const MAX_SEND_RETRIES = 2;
 const RETRY_BASE_MS = 1000;
@@ -282,14 +337,34 @@ async function hubFetch(
   }
 
   for (let attempt = 0; attempt <= MAX_SEND_RETRIES; attempt++) {
-    const resp = await fetch(url, { ...init, headers });
+    let resp: Response;
+    try {
+      resp = await fetch(url, {
+        ...init,
+        headers,
+        signal: AbortSignal.timeout(30_000), // 30s fetch timeout
+      });
+    } catch (fetchErr: any) {
+      // Retry on network errors (ECONNRESET, ETIMEDOUT, ENOTFOUND, etc.)
+      if (attempt < MAX_SEND_RETRIES) {
+        const delayMs = RETRY_BASE_MS * (attempt + 1);
+        console.warn(
+          `[hxa-connect] network error on ${path}: ${fetchErr.message}, retrying in ${delayMs}ms (attempt ${attempt + 1})`,
+        );
+        await new Promise((r) => setTimeout(r, delayMs));
+        continue;
+      }
+      throw fetchErr;
+    }
+
     if (resp.ok) return resp;
 
-    if (resp.status === 429 && attempt < MAX_SEND_RETRIES) {
+    // Retry on 429 (rate limit) or 5xx (server error)
+    if ((resp.status === 429 || resp.status >= 500) && attempt < MAX_SEND_RETRIES) {
       const retryAfter = parseInt(resp.headers.get("Retry-After") || "", 10);
       const delayMs = retryAfter > 0 ? retryAfter * 1000 : RETRY_BASE_MS * (attempt + 1);
       console.warn(
-        `[hxa-connect] rate limited on ${path}, retrying in ${delayMs}ms (attempt ${attempt + 1})`,
+        `[hxa-connect] ${resp.status} on ${path}, retrying in ${delayMs}ms (attempt ${attempt + 1})`,
       );
       await new Promise((r) => setTimeout(r, delayMs));
       continue;
@@ -666,6 +741,9 @@ async function connectAccount(
     url: acct.hubUrl,
     token: acct.agentToken,
     orgId: acct.orgId,
+    wsOptions: {
+      maxPayload: MAX_WS_PAYLOAD,
+    },
     reconnect: {
       enabled: true,
       initialDelay: 3000,
@@ -701,10 +779,23 @@ async function connectAccount(
         return;
       }
 
+      // Rate limiting
+      const rlKey = `${accountId}:dm:${msg.message?.sender_id || sender}`;
+      if (!getRateLimiter(rlKey).consume()) {
+        log?.warn?.(`${lp} DM from ${sender} rate-limited, dropping`);
+        return;
+      }
+
       // Download media after policy checks to avoid wasted effort
       const msgParts = msg.message?.parts || msg.parts;
       const localPaths = await downloadMediaParts(msgParts, client, mediaDir, lp);
       const attachments = formatAttachments(msgParts, localPaths);
+
+      // Content size check
+      if ((content.length + attachments.length) > MAX_CONTENT_LENGTH) {
+        log?.warn?.(`${lp} DM from ${sender} rejected — content too large (${content.length + attachments.length} bytes)`);
+        return;
+      }
 
       log?.info?.(`${lp} DM from ${sender}: ${content.substring(0, 80)}`);
       dispatchInbound({
@@ -795,11 +886,26 @@ async function connectAccount(
         return;
       }
 
+      // Rate limiting (interactive messages only)
+      if (isInteractiveDelivery) {
+        const rlKey = `${accountId}:thread:${message.sender_id || sender}`;
+        if (!getRateLimiter(rlKey).consume()) {
+          log?.warn?.(`${lp} Thread ${threadId} from ${sender} rate-limited, dropping`);
+          return;
+        }
+      }
+
       const hasCurrentMessage = !!message.id;
       const localPaths = hasCurrentMessage
         ? await downloadMediaParts(message.parts, client, mediaDir, lp)
         : {};
       const attachments = formatAttachments(message.parts, localPaths);
+
+      // Content size check
+      if ((content.length + attachments.length) > MAX_CONTENT_LENGTH) {
+        log?.warn?.(`${lp} Thread ${threadId} from ${sender} rejected — content too large (${content.length + attachments.length} bytes)`);
+        return;
+      }
       const lifecycleBlock = buildLifecycleBlock(snapshot, formatThreadLifecycleEvent);
 
       // Build message with XML tags (consistent with Lark/TG format)
@@ -963,7 +1069,8 @@ async function connectAccount(
     log?.info?.(`${lp} Reconnected after ${attempts} attempt(s)`);
   });
   client.on("reconnect_failed", ({ attempts }: any) => {
-    log?.error?.(`${lp} Reconnect failed after ${attempts} attempts`);
+    log?.error?.(`${lp} Reconnect failed after ${attempts} attempts — scheduling recovery`);
+    scheduleRecovery("reconnect_failed");
   });
   client.on("error", (err: any) => {
     log?.error?.(`${lp} Error: ${err?.message || err}`);
@@ -971,11 +1078,49 @@ async function connectAccount(
 
   client.on("session_invalidated", ({ code, reason }: any) => {
     log?.error?.(`${lp} Session invalidated (code ${code}): ${reason || "unknown"}`);
-    log?.error?.(`${lp} SDK will not auto-reconnect — connection lost`);
-    threadCtx.stop();
-    client.disconnect();
-    wsConnections.delete(accountId);
+    log?.error?.(`${lp} SDK will not auto-reconnect — scheduling recovery`);
+    scheduleRecovery("session_invalidated");
   });
+
+  // ─── Recovery logic ──────────────────────────────────────
+  // When WS dies terminally (session_invalidated or reconnect_failed),
+  // tear down the current client and attempt a full reconnect cycle.
+  let recoveryInProgress = false;
+
+  function scheduleRecovery(reason: string) {
+    if (recoveryInProgress) {
+      log?.warn?.(`${lp} Recovery already in progress, skipping (trigger: ${reason})`);
+      return;
+    }
+    if (abortSignal?.aborted) {
+      log?.info?.(`${lp} Abort signal active, skipping recovery (trigger: ${reason})`);
+      return;
+    }
+    recoveryInProgress = true;
+
+    // Clean up current connection
+    try { threadCtx.stop(); } catch {}
+    try { client.disconnect(); } catch {}
+    wsConnections.delete(accountId);
+
+    log?.warn?.(`${lp} Will attempt full reconnect in ${RECOVERY_DELAY_MS}ms (trigger: ${reason})`);
+    setTimeout(async () => {
+      recoveryInProgress = false;
+      if (abortSignal?.aborted) {
+        log?.info?.(`${lp} Abort signal active, cancelling recovery`);
+        return;
+      }
+      try {
+        log?.info?.(`${lp} Starting recovery reconnect...`);
+        await connectAccount(accountId, acct, cfg, log, abortSignal);
+        log?.info?.(`${lp} Recovery reconnect succeeded`);
+      } catch (err: any) {
+        log?.error?.(`${lp} Recovery reconnect failed: ${err.message}`);
+        // Schedule another recovery attempt with increasing delay
+        setTimeout(() => scheduleRecovery("recovery_retry"), RECOVERY_DELAY_MS * 2);
+      }
+    }, RECOVERY_DELAY_MS);
+  }
 
   // Listen for abort signal to disconnect gracefully
   if (abortSignal) {
@@ -983,6 +1128,7 @@ async function connectAccount(
       "abort",
       () => {
         log?.info?.(`${lp} Abort signal received, disconnecting`);
+        recoveryInProgress = true; // prevent recovery from firing
         threadCtx.stop();
         client.disconnect();
         wsConnections.delete(accountId);
@@ -991,10 +1137,37 @@ async function connectAccount(
     );
   }
 
-  // Connect
+  // ─── Connect with retry loop ─────────────────────────────
   log?.info?.(`${lp} Connecting as "${agentName}" to ${acct.hubUrl}`);
-  await client.connect();
-  log?.info?.(`${lp} WebSocket connected`);
+
+  let connectAttempt = 0;
+  while (connectAttempt < MAX_CONNECT_ATTEMPTS) {
+    if (abortSignal?.aborted) {
+      log?.info?.(`${lp} Abort signal active, cancelling connect`);
+      return;
+    }
+    try {
+      await client.connect();
+      log?.info?.(`${lp} WebSocket connected`);
+      break;
+    } catch (err: any) {
+      try { client.disconnect(); } catch {}
+      connectAttempt++;
+      const delay = Math.min(
+        CONNECT_INITIAL_DELAY * Math.pow(CONNECT_BACKOFF, connectAttempt - 1),
+        CONNECT_MAX_DELAY,
+      );
+      log?.error?.(`${lp} Connection attempt ${connectAttempt} failed: ${err.message}`);
+      if (connectAttempt >= MAX_CONNECT_ATTEMPTS) {
+        log?.error?.(`${lp} Giving up after ${connectAttempt} attempts`);
+        try { client.disconnect(); } catch {}
+        return;
+      }
+      log?.info?.(`${lp} Retrying in ${(delay / 1000).toFixed(1)}s...`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+
   await threadCtx.start();
   log?.info?.(`${lp} ThreadContext started (per-thread mode, default: mention, filter: @${agentName})`);
 
@@ -1004,6 +1177,7 @@ async function connectAccount(
     accountId,
     config: acct,
     disconnect: () => {
+      recoveryInProgress = true; // prevent recovery on intentional disconnect
       threadCtx.stop();
       client.disconnect();
     },
