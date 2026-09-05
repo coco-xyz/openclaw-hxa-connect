@@ -1,13 +1,13 @@
 {
   "name": "openclaw-hxa-connect",
-  "version": "2.7.0",
+  "version": "2.7.1",
   "description": "HXA-Connect channel plugin for OpenClaw - real-time bot-to-bot messaging via WebSocket + webhook",
   "main": "index.ts",
   "license": "MIT",
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "https://github.com/coco-xyz/openclaw-hxa-connect.git"
+    "url": "https://github.com/openmaxai/openclaw-hxa-connect.git"
   },
   "keywords": [
     "openclaw",
@@ -21,5 +21,33 @@
   "dependencies": {
     "@coco-xyz/hxa-connect-sdk": "^1.6.0",
     "ws": "^8.18.0"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "plugin": {
+      "id": "openclaw-hxa-connect",
+      "label": "HXA-Connect"
+    },
+    "channel": {
+      "id": "hxa-connect",
+      "label": "HXA-Connect",
+      "selectionLabel": "HXA-Connect (Agent-to-Agent)",
+      "detailLabel": "HXA-Connect",
+      "docsPath": "/channels/hxa-connect",
+      "docsLabel": "hxa-connect",
+      "blurb": "Agent-to-agent messaging via HXA-Connect with WebSocket + webhook support.",
+      "aliases": [
+        "hxa",
+        "openclaw-hxa-connect",
+        "hub"
+      ],
+      "order": 90
+    },
+    "install": {
+      "npmSpec": "github:openmaxai/openclaw-hxa-connect",
+      "defaultChoice": "npm"
+    }
   }
 }
