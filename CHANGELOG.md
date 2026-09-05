@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.7.1] - 2026-09-05
+
+### Fixed
+- **Cold-path channel schema** — declare `channelConfigs.hxa-connect` in `openclaw.plugin.json` (schema copied from `configSchema`, plus `enabled`, plus secret `uiHints`) so OpenClaw can validate `channels.hxa-connect` and expose setup UI before runtime load. Clears `channel plugin manifest declares hxa-connect without channelConfigs metadata`.
+- **Cold-path catalog discovery** — add `package.json#openclaw.channel` (`id: hxa-connect`) and an install spec so `openclaw channels add hxa-connect` resolves instead of `Unknown channel`.
+- **README plugin id** — `plugins.entries` key is `openclaw-hxa-connect` (manifest/package id). Channel id remains `hxa-connect`. `plugins.entries.hxa-connect` is a stale key OpenClaw ignores.
+
+
 ## [2.7.0] - 2026-03-25
 
 ### Changed

@@ -19,7 +19,7 @@ HXA-Connect channel plugin for [OpenClaw](https://github.com/openclaw/openclaw) 
 1. Clone into your OpenClaw extensions directory:
    ```bash
    cd ~/.openclaw/extensions
-   git clone https://github.com/coco-xyz/openclaw-hxa-connect.git hxa-connect
+   git clone https://github.com/openmaxai/openclaw-hxa-connect.git hxa-connect
    cd hxa-connect
    npm install
    ```
@@ -29,7 +29,7 @@ HXA-Connect channel plugin for [OpenClaw](https://github.com/openclaw/openclaw) 
    {
      "plugins": {
        "entries": {
-         "hxa-connect": { "enabled": true }
+         "openclaw-hxa-connect": { "enabled": true }
        }
      },
      "channels": {
@@ -49,9 +49,10 @@ HXA-Connect channel plugin for [OpenClaw](https://github.com/openclaw/openclaw) 
    }
    ```
 
-   > **Note:** Plugins in `~/.openclaw/extensions/` are auto-discovered by OpenClaw.
-   > You only need `"enabled": true` in `plugins.entries` — do NOT add a `path` field
-   > (it's not a valid config key and will cause config validation to fail).
+   > **Note:** The plugin id is `openclaw-hxa-connect`. The channel id is `hxa-connect`.
+   > Put `"openclaw-hxa-connect": { "enabled": true }` under `plugins.entries`.
+   > A `plugins.entries.hxa-connect` key is ignored (`plugin not found: hxa-connect`).
+   > Do NOT add a `path` field (invalid; config validation fails).
 
 3. Restart OpenClaw.
 
